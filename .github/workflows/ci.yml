@@ -1,0 +1,111 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ruff
+      - run: ruff check .
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: pip install -e .
+      - run: python -m unittest discover -s tests -t . -v
+
+  integration:
+    name: integration (real Mosquitto broker)
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e .
+      - run: docker compose up -d --wait mosquitto
+      - run: python -m unittest tests.test_integration_mqtt -v
+        env:
+          MQTT_HOST: localhost
+      - name: Broker logs on failure
+        if: failure()
+        run: docker compose logs mosquitto
+      - if: always()
+        run: docker compose down -v
+
+  e2e:
+    name: e2e (full docker compose stack)
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start broker and ingestor
+        run: docker compose up -d --build --wait ingestor
+      - name: Run the simulator (300 ticks x 5 stations, with injected faults)
+        run: docker compose run --rm simulator
+      - name: Wait until every message is stored (no loss), then stop the ingestor
+        run: |
+          # 5 stations x 300 ticks x 4 tests - 30 dropout ticks x 4 tests = 5880 results
+          for i in $(seq 1 60); do
+            n=$(docker compose exec -T ingestor python -c "import sqlite3; print(sqlite3.connect('/data/telemetry.db').execute('select count(*) from results').fetchone()[0])")
+            [ "$n" = "5880" ] && break
+            sleep 1
+          done
+          echo "results stored: $n"
+          test "$n" = "5880"
+          docker compose stop ingestor
+      - name: Analyze and check detections against the injected faults
+        run: docker compose run --rm analyzer
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: telemetry-report
+          path: output/
+      - name: Logs on failure
+        if: failure()
+        run: docker compose logs
+      - if: always()
+        run: docker compose down -v
+
+  release:
+    name: publish image (tags only)
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [lint, test, integration, e2e]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
