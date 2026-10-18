@@ -2,8 +2,11 @@
 
 [![CI](https://github.com/vemulayagnitha05/teststation-telemetry/actions/workflows/ci.yml/badge.svg)](https://github.com/vemulayagnitha05/teststation-telemetry/actions/workflows/ci.yml)
 
-A small, containerised telemetry pipeline for **simulated production test stations**:
+**Stack:** Python 3.11+, MQTT/Mosquitto, SQLite, Docker Compose, pytest, GitHub Actions
 
+**Status:** Portfolio/learning project; Docker pipeline and CI verified.
+
+A small telemetry pipeline I built to simulate how test station data could be collected, checked, stored, and analysed.
 ```
 test stations (simulator) --MQTT--> Mosquitto --> ingestor (validate, dedupe) --> SQLite
                                                                                     |
@@ -11,33 +14,36 @@ test stations (simulator) --MQTT--> Mosquitto --> ingestor (validate, dedupe) --
                          incidents.jsonl (input for rca-agent)    results.csv (input for test-report-tool)
 ```
 
-It is the infrastructure side of my other two projects: `test-report-tool` analyses test
-results and `rca-agent` diagnoses failures. This project is how those results would arrive in
-the first place, and it produces incidents with a known cause so the diagnosis side can be
-checked against ground truth.
+This project is also connected to my other two projects: `test-report-tool` analyses test
+results and `rca-agent` diagnoses failures. I wanted this project to simulate the part before
+that, where the data is collected and incidents are detected. The simulator also injects known
+faults, which gives me ground truth to check whether the detectors found the right problem.
 
-It is a **portfolio / learning project on simulated data**, not a production system.
+This is a portfolio/learning project using simulated data, so the goal is to show how I approached the problem rather than build a production system.
 
 ## Quick start
 
-### Without Docker (in-process demo, about 10 seconds)
+### Without Docker (quick local demo)
 
 ```
 python -m venv venv
-venv\Scripts\activate            # Linux/macOS: source venv/bin/activate
+
+# Windows
+venv\Scripts\activate
+
+# Linux/macOS
+source venv/bin/activate
+
 pip install -e .
 python -m telemetry demo
 ```
-
-Open `output/report.html`. The demo runs the same ingestion and detection code, but uses an
-in-memory broker instead of Mosquitto. A pre-generated example (simulated data) is in
+Open `output/report.html`. The demo uses the same ingestion and detection code, but uses an in-memory broker instead of Mosquitto. A pre-generated example (simulated data) is in
 `docs/sample_report.html`.
 
 ### With Docker (real MQTT broker)
 
 ```
 docker compose up --build          # mosquitto + ingestor + simulator (simulator exits when done)
-docker compose run --rm analyzer   # writes output/report.html, incidents.jsonl, results.csv
 docker compose down -v             # reset: removes stored data
 ```
 
@@ -48,17 +54,19 @@ simulator against old data would mix two runs.
 
 ```
 pip install -e .
-python -m unittest discover -s tests -t . -v                     # 59 unit tests
-docker compose up -d --wait mosquitto
-MQTT_HOST=localhost python -m unittest tests.test_integration_mqtt -v   # real broker
+python -m pytest
 ```
+
+Locally, this gives `59 passed, 1 skipped`. The skipped test is the real-broker integration test
+when `MQTT_HOST` is not set.
 
 ## What it does
 
-**Simulator** (`simulator.py`). 5 stations run 4 checks per tick (`tx_power`, `rx_sensitivity`,
-`supply_current`, `handover`) and publish results plus a heartbeat. Time is simulated (tick N is
-`t0 + N * tick_s`) so runs are fast and reproducible, while the messages still travel over real
-MQTT. Injected faults, with known start times kept as ground truth:
+**Simulator** (`simulator.py`). I simulate 5 stations, with each station running 4 checks per tick
+(`tx_power`, `rx_sensitivity`, `supply_current`, `handover`). Each tick publishes the test results
+and a heartbeat. Time is simulated (tick N is
+`t0 + N * tick_s`) so runs are fast and reproducible. In the Docker setup, the messages travel
+over the real MQTT broker. Injected faults, with known start times kept as ground truth:
 
 | Fault | Station | Effect |
 | --- | --- | --- |
@@ -69,31 +77,28 @@ MQTT. Injected faults, with known start times kept as ground truth:
 
 st-01 and st-05 are otherwise healthy, so false positives can be counted.
 
-**Ingestor** (`ingestor.py`, `store.py`). Validates every payload strictly (`schema.py`), checks
-that the station in the payload matches the topic, rejects and records bad messages, and stores
-the rest in SQLite. Inserts are idempotent on `(station_id, seq)`, because MQTT QoS 1 can
-redeliver a message.
+**Ingestor** (`ingestor.py`, `store.py`). This is where I validate the incoming messages, check
+that the station in the payload matches the MQTT topic, reject invalid messages, and store the
+valid ones in SQLite. Inserts are idempotent on `(station_id, seq)`, since MQTT QoS 1 can
+redeliver messages.
 
-**Detectors** (`detectors.py`). All are plain, explainable functions:
-
+**Detectors** (`detectors.py`). I kept the detectors simple and explainable:
 | Detector | Method | Notes |
 | --- | --- | --- |
 | Drift | Two-sided CUSUM per (station, test), baseline = first 50 samples, `k=1.0`, `h=10` | reports estimated onset and whether limits were later crossed |
-| Flaky | Moderate rate of *unexplained* failures (10-90%) plus frequent pass/fail alternation | failures with an out-of-limit measurement are excluded, a contiguous failure block is a regression and not flaky |
+| Flaky | Moderate rate of *unexplained* failures (10-90%) plus frequent pass/fail alternation | failures with an out-of-limit measurement are excluded; a contiguous failure block is a regression and not flaky |
 | Dropout | Heartbeat gap longer than 3x the station's median interval | also reports a station that never came back |
 | Cpk | Per (station, test) over the last 50 measurements | shown in the report, not an incident |
 
-**Outputs** (`report.py`, `exporters.py`). A self-contained HTML report with incident cards and
-trend sparklines, `results.csv` in the column layout of `test-report-tool` (plus `station_id`),
-and `incidents.jsonl` with a log text and recent pass/fail history per incident.
-
+**Outputs** (`report.py`, `exporters.py`). The project produces a self-contained HTML report with
+incident cards and trend sparklines, `results.csv` for `test-report-tool`, and `incidents.jsonl`
+for `rca-agent`. The incident records also include the log text and recent pass/fail history.
 ## Detector tuning and measured results
 
-I first used textbook CUSUM settings (`k=0.5`, `h=5-8`, baseline of 30 samples). The demo then
-flagged two healthy stations. Measuring on fault-free data showed why: estimating the baseline
-from a small sample acts like a permanent bias, so false-alarm rates were far higher than the
-theoretical tables suggest.
-
+I started with common CUSUM settings (`k=0.5`, `h=5-8`, baseline of 30 samples), but the demo
+flagged two healthy stations. I then tested the detector on fault-free data and found that the
+small baseline sample was causing too many false alarms. This is why I increased the baseline
+and adjusted the CUSUM parameters.
 False alarms on 2000 fault-free series of 300 samples, and detection of a 1.5-sigma step:
 
 | baseline | k | h | false alarms | 1.5-sigma step: median delay |
@@ -104,7 +109,7 @@ False alarms on 2000 fault-free series of 300 samples, and detection of a 1.5-si
 | **50** | **1.0** | **10** | **0.05%** | **18 samples** |
 | 100 | 1.0 | 10 | 0.00% | 18 samples |
 
-The chosen setting is slower to react but trustworthy. A ramp of 0.1 sigma per tick is caught
+The chosen setting is slower to react, but it gives a much lower false-alarm rate. A ramp of 0.1 sigma per tick is caught
 after about 23 samples.
 
 End-to-end on the default scenario, 200 simulated runs with different seeds (600 injected
@@ -116,25 +121,28 @@ data* and say nothing about real stations.
 
 | Part | Status |
 | --- | --- |
-| Schema validation, store, ingestor, simulator, detectors, evaluation, exports, report | Covered by 59 unit tests, all passing |
-| Full pipeline through the in-memory broker, including the 30-seed detection test | Passing |
-| `PahoTransport` logic (subscribe, dispatch, reconnect, handler errors) | Tested against a **fake** paho client, not the real library |
-| `docker compose` stack, Mosquitto, real `paho-mqtt` | **Not yet run.** Written but not executed in the environment where this was built |
-| GitHub Actions workflow (lint, tests, integration, e2e, image release) | **Not yet run.** First push will show whether it passes |
-| Integration test against a real broker | Written, skipped unless `MQTT_HOST` is set, not yet run |
+| Schema validation, store, ingestor, simulator, detectors, evaluation, exports, report | Covered by 59 tests; all passing |
+| Full pipeline through the in-memory broker, including detection evaluation | Passing |
+| `PahoTransport` logic | Tested against a fake paho client |
+| Docker Compose stack, Mosquitto, real `paho-mqtt` | Verified locally |
+| Real MQTT data flow | Verified locally: 7,353 messages published, 7,350 stored and 3 rejected |
+| SQLite persistence | Verified locally: 5,880 results, 1,470 heartbeats and 3 rejected messages |
+| GitHub Actions CI | Passing on `main` |
+| Integration test against a real broker | Environment-dependent; skipped unless `MQTT_HOST` is set |
 
-To close the gaps: run the Docker quick start once, run the integration test, push to GitHub
-and fix whatever the first CI run reports, then update this table with what actually happened.
+The Docker Compose path and GitHub Actions workflow have been verified. The real-broker pytest
+integration test is environment-dependent, so it is skipped locally unless `MQTT_HOST` is set.
 
 ## Design decisions
 
 - **Idempotent ingestion.** QoS 1 is at-least-once, so duplicates are expected, not exceptional.
-- **Strict validation at the boundary.** Bad payloads are counted and stored for inspection
-  instead of crashing the consumer or silently polluting the database.
+- **Validate messages before storing them.** Bad payloads are counted and kept for inspection
+  instead of crashing the consumer or getting into the database unnoticed.
 - **Device timestamps, not arrival time.** Drift and dropout detection use the timestamp in the
   message, so broker or network delay does not create false dropouts.
-- **Transport abstraction.** The same ingestor runs on an in-memory broker (fast, deterministic
-  tests) and on paho-mqtt (real broker). Only the latter needs Docker.
+- **Transport abstraction.** I use an in-memory broker for fast, deterministic tests and
+  `paho-mqtt` when running against a real broker. This lets me test most of the pipeline without
+  needing Docker every time.
 - **Ground truth from the simulator.** Detection quality is a number (precision, recall, onset
   error), and the e2e CI job fails if detections stop matching the injected faults.
 - **Ingestor readiness.** The ingestor only reports healthy after its subscriptions are
@@ -142,10 +150,10 @@ and fix whatever the first CI run reports, then update this table with what actu
 
 ## Connection to the other projects
 
-- `results.csv` can be passed to `test-report-tool` for pass-rate, flaky and Cpk analysis.
+-  I can pass `results.csv` to `test-report-tool` for pass-rate, flaky and Cpk analysis.
 - `incidents.jsonl` holds one record per incident with `log`, `history`, `evidence` and the
-  detector's `detected_kind`. Map these fields onto the `FailureRecord` in `rca-agent`
-  (`src/rca/schema.py`); I have not checked field names against that schema. The simulator's
+  detector's `detected_kind`. I plan to use these fields as input for `rca-agent`, although I
+  have not yet checked the field names against its `FailureRecord` schema. The simulator's
   ground truth is only suitable for testing the pipeline, not as labelled data for a thesis
   evaluation, which needs the manual labelling protocol described in `rca-agent`.
 
@@ -184,7 +192,6 @@ Dockerfile  docker-compose.yml
 
 ## Roadmap
 
-- Run and fix the Docker and CI paths, then record results here.
-- Feed `incidents.jsonl` into `rca-agent` and report its accuracy on these incidents.
+- Connect `incidents.jsonl` to `rca-agent` and evaluate how well it identifies the injected faults.
 - Replace SQLite with TimescaleDB and add a Grafana dashboard.
 - Stream the detectors instead of running them in batch.
