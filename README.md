@@ -143,19 +143,19 @@ integration test is environment-dependent, so it is skipped locally unless `MQTT
 - **Transport abstraction.** I use an in-memory broker for fast, deterministic tests and
   `paho-mqtt` when running against a real broker. This lets me test most of the pipeline without
   needing Docker every time.
-- **Ground truth from the simulator.** Detection quality is a number (precision, recall, onset
-  error), and the e2e CI job fails if detections stop matching the injected faults.
+- **Ground truth from the simulator.** Detection quality is measured using precision, recall,
+  and onset error, and the e2e CI job fails if detections stop matching the injected faults.
 - **Ingestor readiness.** The ingestor only reports healthy after its subscriptions are
   acknowledged, and the simulator waits for that, so no messages are lost at start-up.
 
 ## Connection to the other projects
 
--  I can pass `results.csv` to `test-report-tool` for pass-rate, flaky and Cpk analysis.
+- I can pass `results.csv` to `test-report-tool` for pass-rate, flaky and Cpk analysis.
 - `incidents.jsonl` holds one record per incident with `log`, `history`, `evidence` and the
   detector's `detected_kind`. I plan to use these fields as input for `rca-agent`, although I
   have not yet checked the field names against its `FailureRecord` schema. The simulator's
-  ground truth is only suitable for testing the pipeline, not as labelled data for a thesis
-  evaluation, which needs the manual labelling protocol described in `rca-agent`.
+  ground truth is useful for testing the pipeline, but it should not be used as labelled data
+  for a thesis evaluation, which needs the manual labelling protocol described in `rca-agent`.
 
 ## Limitations
 
